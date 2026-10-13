@@ -5,11 +5,16 @@ edition = "2024"
 rust-version = "1.95"
 
 [dependencies]
+chrono = "=0.4.45"
+dirs = "=6.0.0"
 gpui-kit = { version = "=0.7.1", features = ["tree-sitter"] }
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 
 [dev-dependencies]
 gpui-kit = { version = "=0.7.1", features = ["tree-sitter", "test-support"] }
+
+[build-dependencies]
+embed-resource = "=3.0.12"
 
 [profile.dev]
 debug = 0
