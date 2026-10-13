@@ -42,6 +42,19 @@ open "target/release/JSON Editor.app"
 
 发布配置优先优化体积，启用完整 LTO、单代码生成单元和符号剥离。`panic = "abort"` 表示发生 Rust panic 时直接结束程序，不进行栈展开。首次发布编译比开发编译慢。
 
+## GitHub Actions 构建和发布
+
+在 GitHub 的 **Actions → Build and release → Run workflow** 中手动运行，成功后可以在该次运行的 Artifacts 中下载 Windows x64、macOS Intel 和 macOS Apple Silicon 的 ZIP。产物保留 14 天；Windows ZIP 包含 EXE，macOS ZIP 包含完整的 `JSON Editor.app`。
+
+推送 `v*` 标签会运行相同的检查和构建，并在全部平台成功后自动创建 GitHub Release，上传三个 ZIP 和 `SHA256SUMS.txt`。例如先将 `Cargo.toml` 的版本和对应的 `Cargo.lock` 更新并提交，再执行：
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流使用仓库自带的 `GITHUB_TOKEN`，不需要额外配置发布密钥；仓库需允许 GitHub Actions 运行。重复运行同一标签会替换该 Release 的同名附件。macOS 应用仅做临时签名，没有 Apple Developer ID 签名或公证，下载后可能受到 Gatekeeper 限制。
+
 ## 功能
 
 - 自由输入、选中、复制、剪切、粘贴、撤销和重做。
