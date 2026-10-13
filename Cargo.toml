@@ -1,0 +1,23 @@
+[package]
+name = "json-editor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+gpui-kit = { version = "=0.7.1", features = ["tree-sitter"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+
+[dev-dependencies]
+gpui-kit = { version = "=0.7.1", features = ["tree-sitter", "test-support"] }
+
+[profile.dev]
+debug = 0
+
+# Prefer a small distributable executable over maximum runtime throughput.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
