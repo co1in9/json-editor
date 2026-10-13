@@ -26,14 +26,53 @@ const SAMPLE: &str = r#"{
   ]
 }"#;
 
-actions!(json_editor, [FormatJson, ValidateJson]);
+actions!(json_editor, [FormatJson, ValidateJson, CopyDocument, PasteDocument]);
+
+#[cfg(target_os = "macos")]
+const SHORTCUT_MODIFIER: &str = "cmd";
+#[cfg(not(target_os = "macos"))]
+const SHORTCUT_MODIFIER: &str = "ctrl";
+
+#[cfg(target_os = "macos")]
+const SHORTCUT_LABEL: &str = "Cmd";
+#[cfg(not(target_os = "macos"))]
+const SHORTCUT_LABEL: &str = "Ctrl";
+
+fn bind_shortcuts(cx: &mut App) {
+    // Input has its own bindings (e.g. Cmd+Shift+F opens search/replace).
+    // Match at the editor's depth as well so document actions take precedence.
+    for context in ["JsonEditor", "JsonEditor > Input"] {
+        cx.bind_keys([
+            KeyBinding::new(
+                &format!("{SHORTCUT_MODIFIER}-shift-f"),
+                FormatJson,
+                Some(context),
+            ),
+            KeyBinding::new(
+                &format!("{SHORTCUT_MODIFIER}-enter"),
+                ValidateJson,
+                Some(context),
+            ),
+            KeyBinding::new(
+                &format!("{SHORTCUT_MODIFIER}-shift-c"),
+                CopyDocument,
+                Some(context),
+            ),
+            KeyBinding::new(
+                &format!("{SHORTCUT_MODIFIER}-shift-v"),
+                PasteDocument,
+                Some(context),
+            ),
+        ]);
+    }
+}
 
 struct JsonEditor {
     editor: Entity<EditorState>,
     status: String,
     error: bool,
     _subscriptions: Vec<Subscription>,
-    formatted_source: Option<String>,
+    operation_source: Option<String>,
 }
 
 impl JsonEditor {
@@ -52,7 +91,7 @@ impl JsonEditor {
         let subscription = cx.subscribe(&editor, |this, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 if this
-                    .formatted_source
+                    .operation_source
                     .take()
                     .is_some_and(|source| source == state.read(cx).value().as_str())
                 {
@@ -70,7 +109,7 @@ impl JsonEditor {
             status: "就绪 · 点击行号旁的箭头折叠对象或数组".into(),
             error: false,
             _subscriptions: vec![subscription],
-            formatted_source: None,
+            operation_source: None,
         }
     }
 
@@ -78,7 +117,7 @@ impl JsonEditor {
         let source = self.editor.read(cx).value().to_string();
         match json::format(&source) {
             Ok(formatted) => {
-                self.formatted_source = Some(formatted.clone());
+                self.operation_source = Some(formatted.clone());
                 self.editor
                     .update(cx, |state, cx| state.replace_all(formatted, window, cx));
                 self.status = "已格式化 · 2 空格缩进".into();
@@ -96,6 +135,33 @@ impl JsonEditor {
                 self.error = false;
             }
             Err(error) => self.report(error),
+        }
+        cx.notify();
+    }
+
+    fn copy_document(&mut self, _: &CopyDocument, _: &mut Window, cx: &mut Context<Self>) {
+        let source = self.editor.read(cx).value().to_string();
+        cx.write_to_clipboard(ClipboardItem::new_string(source));
+        self.status = "已复制整份文档到剪贴板".into();
+        self.error = false;
+        cx.notify();
+    }
+
+    fn paste_document(&mut self, _: &PasteDocument, window: &mut Window, cx: &mut Context<Self>) {
+        match cx.read_from_clipboard().and_then(|item| item.text()) {
+            Some(source) if !source.is_empty() => {
+                self.operation_source = Some(source.clone());
+                self.editor.update(cx, |state, cx| {
+                    state.replace_all(source, window, cx);
+                    state.focus(window, cx);
+                });
+                self.status = "已从剪贴板替换整份文档 · 可撤销 · 待验证".into();
+                self.error = false;
+            }
+            _ => {
+                self.status = "剪贴板为空、无法读取或不包含文本 · 文档未修改".into();
+                self.error = true;
+            }
         }
         cx.notify();
     }
@@ -122,6 +188,8 @@ impl Render for JsonEditor {
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::format))
             .on_action(cx.listener(Self::validate))
+            .on_action(cx.listener(Self::copy_document))
+            .on_action(cx.listener(Self::paste_document))
             .child(
                 h_flex()
                     .px_6()
@@ -131,12 +199,43 @@ impl Render for JsonEditor {
                     .border_color(cx.theme().border)
                     .child(div().text_lg().font_semibold().child("JSON Editor"))
                     .child(div().flex_1())
-                    .child(Button::new("format").label("格式化").on_click(
-                        cx.listener(|this, _, window, cx| this.format(&FormatJson, window, cx)),
-                    ))
-                    .child(Button::new("validate").primary().label("验证").on_click(
-                        cx.listener(|this, _, window, cx| this.validate(&ValidateJson, window, cx)),
-                    )),
+                    .child(
+                        Button::new("copy-document")
+                            .label("复制")
+                            .tooltip_with_action("复制整份文档", &CopyDocument, Some("JsonEditor"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.copy_document(&CopyDocument, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("paste-document")
+                            .label("从剪贴板粘贴")
+                            .tooltip_with_action(
+                                "从剪贴板替换整份文档（可撤销）",
+                                &PasteDocument,
+                                Some("JsonEditor"),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.paste_document(&PasteDocument, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("format")
+                            .label("格式化")
+                            .tooltip_with_action("格式化 JSON", &FormatJson, Some("JsonEditor"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.format(&FormatJson, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("validate")
+                            .primary()
+                            .label("验证")
+                            .tooltip_with_action("验证 JSON", &ValidateJson, Some("JsonEditor"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.validate(&ValidateJson, window, cx)
+                            })),
+                    ),
             )
             .child(
                 h_flex()
@@ -146,7 +245,9 @@ impl Render for JsonEditor {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child("document.json")
-                    .child("Ctrl+Shift+F 格式化   ·   Ctrl+Enter 验证"),
+                    .child(format!(
+                        "{SHORTCUT_LABEL}+Shift+F 格式化 · {SHORTCUT_LABEL}+Enter 验证"
+                    )),
             )
             .child(
                 div().flex_1().min_h_0().px_4().pb_3().child(
@@ -190,10 +291,7 @@ fn main() {
         .run(|cx| {
             gpui_kit::init(cx);
             Theme::change(ThemeMode::Light, None, cx);
-            cx.bind_keys([
-                KeyBinding::new("ctrl-shift-f", FormatJson, Some("JsonEditor")),
-                KeyBinding::new("ctrl-enter", ValidateJson, Some("JsonEditor")),
-            ]);
+            bind_shortcuts(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -224,10 +322,91 @@ fn main() {
 
 #[cfg(test)]
 mod ui_tests {
-    use super::{FormatJson, JsonEditor, ValidateJson};
+    use super::{FormatJson, JsonEditor, SHORTCUT_MODIFIER, ValidateJson, bind_shortcuts};
     use gpui_kit::{
-        AppContext, TestAppContext, WindowOptions, component::input::Undo, test::TestWindowExt,
+        AppContext, ClipboardItem, TestAppContext, WindowOptions, component::input::Undo,
+        test::TestWindowExt,
     };
+
+    #[gpui_kit::test]
+    fn clipboard_buttons_shortcuts_and_undo(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            bind_shortcuts(cx);
+        });
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| JsonEditor::new(window, cx))
+            })
+            .unwrap()
+        });
+        let original = r#"{"hello":"你好","n":42}"#;
+        let replacement = "{\n  \"clipboard\": [true, null]\n}";
+        cx.update_window(window, |_, window, cx| {
+            view.read(cx).editor.clone().update(cx, |state, cx| {
+                state.set_value(original, window, cx);
+                state.focus(window, cx);
+            });
+            window.render_frame(cx);
+            window.click("copy-document", cx);
+            assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), original);
+            cx.write_to_clipboard(ClipboardItem::new_string(replacement.into()));
+            window.click("paste-document", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert_eq!(view.read(cx).editor.read(cx).value().as_str(), replacement);
+            assert!(view.read(cx).status.starts_with("已从剪贴板"));
+            window.dispatch_action(Box::new(Undo), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert_eq!(view.read(cx).editor.read(cx).value().as_str(), original);
+            cx.write_to_clipboard(ClipboardItem { entries: vec![] });
+            window.click("paste-document", cx);
+            assert_eq!(view.read(cx).editor.read(cx).value().as_str(), original);
+            assert!(view.read(cx).error);
+            cx.write_to_clipboard(ClipboardItem::new_string("{invalid JSON".into()));
+            view.read(cx)
+                .editor
+                .clone()
+                .update(cx, |state, cx| state.focus(window, cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), &format!("{SHORTCUT_MODIFIER}-shift-v"));
+        cx.simulate_keystrokes(window.into(), &format!("{SHORTCUT_MODIFIER}-shift-c"));
+        cx.update_window(window, |_, _, cx| {
+            assert_eq!(view.read(cx).editor.read(cx).value().as_str(), "{invalid JSON");
+            assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "{invalid JSON");
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), &format!("{SHORTCUT_MODIFIER}-enter"));
+        cx.update_window(window, |_, window, cx| {
+            assert!(view.read(cx).error);
+            assert!(view.read(cx).status.starts_with("第 1 行"));
+            view.read(cx).editor.clone().update(cx, |state, cx| {
+                state.set_value(original, window, cx);
+                state.focus(window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), &format!("{SHORTCUT_MODIFIER}-shift-f"));
+        cx.update_window(window, |_, _, cx| {
+            assert!(view.read(cx).status.starts_with("已格式化"));
+            assert!(view.read(cx).editor.read(cx).value().contains('\n'));
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), &format!("{SHORTCUT_MODIFIER}-enter"));
+        cx.update_window(window, |_, _, cx| {
+            assert!(!view.read(cx).error);
+            assert!(view.read(cx).status.starts_with("验证通过"));
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn toolbar_formats_validates_and_preserves_undo(cx: &mut TestAppContext) {
