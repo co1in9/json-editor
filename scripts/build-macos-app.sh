@@ -18,7 +18,9 @@ version=$(awk '
 ' Cargo.toml)
 app_path="$project_dir/target/release/JSON Editor.app"
 mkdir -p "$app_path/Contents/MacOS"
+mkdir -p "$app_path/Contents/Resources"
 install -m 755 target/release/json-editor "$app_path/Contents/MacOS/json-editor"
+install -m 644 assets/icon/json-editor.icns "$app_path/Contents/Resources/json-editor.icns"
 
 cat > "$app_path/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -39,6 +41,8 @@ cat > "$app_path/Contents/Info.plist" <<EOF
     <string>JSON Editor</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>json-editor.icns</string>
     <key>CFBundleShortVersionString</key>
     <string>$version</string>
     <key>CFBundleVersion</key>
