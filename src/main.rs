@@ -310,6 +310,7 @@ impl JsonEditor {
                 self.operation_source = Some(source.clone());
                 self.renaming = false;
                 self.pending_document = None;
+                window.close_dialog(cx);
                 self.editor.update(cx, |state, cx| {
                     // Loading another document starts a fresh undo history.
                     state.set_value(source, window, cx);
@@ -352,6 +353,7 @@ impl JsonEditor {
                 self.status = format!("已重命名 · {name}");
                 self.error = false;
                 self.refresh_history(cx);
+                window.close_dialog(cx);
                 self.editor.update(cx, |state, cx| state.focus(window, cx));
             }
             Err(error) => {
@@ -362,12 +364,211 @@ impl JsonEditor {
         cx.notify();
     }
 
+    fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_history(cx);
+        let editor = cx.entity();
+        let history_view = cx.new(|cx| {
+            let subscription = cx.observe(&editor, |_, _, cx| cx.notify());
+            HistoryDialog {
+                editor,
+                _subscription: subscription,
+            }
+        });
+        let editor = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let editor = editor.clone();
+            dialog
+                .title("文档历史")
+                .width(px(560.))
+                .child(history_view.clone())
+                .on_close(move |_, _, cx| {
+                    editor.update(cx, |this, cx| {
+                        this.pending_document = None;
+                        this.renaming = false;
+                        cx.notify();
+                    });
+                })
+        });
+    }
+
+    fn render_history(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context("JsonEditor")
+            .v_flex()
+            .gap_3()
+            .on_action(cx.listener(Self::save))
+            .when(self.pending_document.is_some(), |this| {
+                this.child(
+                    h_flex()
+                        .px_6()
+                        .py_2()
+                        .gap_2()
+                        .flex_wrap()
+                        .child("当前文档尚未保存")
+                        .child(
+                            Button::new("save-and-switch")
+                                .primary()
+                                .label("保存并继续")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save(&SaveDocument, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("discard-and-switch")
+                                .label("放弃改动并继续")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if let Some(destination) = this.pending_document.take() {
+                                        this.open_document(destination, window, cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-switch")
+                                .label("取消")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pending_document = None;
+                                    this.status = "已取消切换 · 当前文档未修改".into();
+                                    this.error = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .when(self.renaming, |this| {
+                this.child(
+                    h_flex()
+                        .px_6()
+                        .py_2()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Input::new(&self.rename_input).id("rename-input")),
+                        )
+                        .child(
+                            Button::new("confirm-rename")
+                                .primary()
+                                .label("确认重命名")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.rename_document(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-rename")
+                                .label("取消")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.renaming = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .w_full()
+                    .v_flex()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().flex_1().font_semibold().child("文档历史"))
+                            .child(
+                                Button::new("refresh-history").label("刷新").on_click(
+                                    cx.listener(|this, _, _, cx| this.refresh_history(cx)),
+                                ),
+                            ),
+                    )
+                    .child(
+                        Button::new("new-document")
+                            .label("新建文档")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_document(DocumentDestination::New, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("rename-document")
+                            .label("重命名当前文档")
+                            .disabled(self.current_name.is_none())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.start_rename(window, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("document-history")
+                            .h(px(240.))
+                            .overflow_y_scroll()
+                            .v_flex()
+                            .gap_1()
+                            .when(self.history.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("暂无历史 · 保存后显示"),
+                                )
+                            })
+                            .children(self.history.iter().enumerate().map(|(index, name)| {
+                                let name = name.clone();
+                                Button::new(("history-document", index))
+                                    .label(name.clone())
+                                    .tooltip(name.clone())
+                                    .w_full()
+                                    .when(self.current_name.as_ref() == Some(&name), |button| {
+                                        button.primary()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.request_document(
+                                            DocumentDestination::History(name.clone()),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                self.store
+                                    .as_ref()
+                                    .map(|store| store.directory().display().to_string())
+                                    .unwrap_or_else(|| "数据目录不可用".into()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(if self.error {
+                        cx.theme().danger
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(self.status.clone()),
+            )
+    }
+
     fn report(&mut self, error: json::JsonError) {
         self.status = format!(
             "第 {} 行，第 {} 列：{}",
             error.line, error.column, error.message
         );
         self.error = true;
+    }
+}
+
+struct HistoryDialog {
+    editor: Entity<JsonEditor>,
+    _subscription: Subscription,
+}
+
+impl Render for HistoryDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.editor.update(cx, |editor, cx| {
+            editor.render_history(cx).into_any_element()
+        })
     }
 }
 
@@ -397,6 +598,13 @@ impl Render for JsonEditor {
                     .border_color(cx.theme().border)
                     .child(div().text_lg().font_semibold().child("JSON Editor"))
                     .child(div().flex_1())
+                    .child(
+                        Button::new("open-history")
+                            .label("文档历史")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_history(window, cx)
+                            })),
+                    )
                     .child(
                         Button::new("save-document")
                             .label("保存")
@@ -459,92 +667,11 @@ impl Render for JsonEditor {
                         "{SHORTCUT_LABEL}+S 保存 · {SHORTCUT_LABEL}+Shift+F 格式化 · {SHORTCUT_LABEL}+Enter 验证"
                     )),
             )
-            .when(self.pending_document.is_some(), |this| {
-                this.child(
-                    h_flex()
-                        .px_6().py_2().gap_2().flex_wrap()
-                        .child("当前文档尚未保存")
-                        .child(Button::new("save-and-switch").primary().label("保存并继续")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save(&SaveDocument, window, cx)
-                            })))
-                        .child(Button::new("discard-and-switch").label("放弃改动并继续")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(destination) = this.pending_document.take() {
-                                    this.open_document(destination, window, cx);
-                                }
-                            })))
-                        .child(Button::new("cancel-switch").label("取消")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.pending_document = None;
-                                this.status = "已取消切换 · 当前文档未修改".into();
-                                this.error = false;
-                                this.editor.update(cx, |state, cx| state.focus(window, cx));
-                                cx.notify();
-                            })))
-                )
-            })
-            .when(self.renaming, |this| {
-                this.child(
-                    h_flex().px_6().py_2().gap_2()
-                        .child(div().flex_1().child(Input::new(&self.rename_input).id("rename-input")))
-                        .child(Button::new("confirm-rename").primary().label("确认重命名")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.rename_document(window, cx)
-                            })))
-                        .child(Button::new("cancel-rename").label("取消")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.renaming = false;
-                                this.editor.update(cx, |state, cx| state.focus(window, cx));
-                                cx.notify();
-                            })))
-                )
-            })
             .child(
-                h_flex().flex_1().min_h_0().items_stretch()
-                    .child(
-                        div().w(px(220.)).flex_shrink_0().v_flex().gap_2().p_3()
-                            .border_r_1().border_color(cx.theme().border)
-                            .child(h_flex().gap_2()
-                                .child(div().flex_1().font_semibold().child("文档历史"))
-                                .child(Button::new("refresh-history").label("刷新")
-                                    .on_click(cx.listener(|this, _, _, cx| this.refresh_history(cx)))))
-                            .child(Button::new("new-document").label("新建文档")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.request_document(DocumentDestination::New, window, cx)
-                                })))
-                            .child(Button::new("rename-document").label("重命名当前文档")
-                                .disabled(self.current_name.is_none())
-                                .on_click(cx.listener(|this, _, window, cx| this.start_rename(window, cx))))
-                            .child(
-                                div().id("document-history").flex_1().min_h_0().overflow_y_scroll()
-                                    .v_flex().gap_1()
-                                    .when(self.history.is_empty(), |this| {
-                                        this.child(div().text_sm().text_color(cx.theme().muted_foreground)
-                                            .child("暂无历史 · 保存后显示"))
-                                    })
-                                    .children(self.history.iter().enumerate().map(|(index, name)| {
-                                        let name = name.clone();
-                                        Button::new(("history-document", index))
-                                            .label(name.clone())
-                                            .tooltip(name.clone())
-                                            .w_full()
-                                            .when(self.current_name.as_ref() == Some(&name), |button| button.primary())
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.request_document(DocumentDestination::History(name.clone()), window, cx)
-                                            }))
-                                    })),
-                            )
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground)
-                                .child(self.store.as_ref().map(|store| store.directory().display().to_string())
-                                    .unwrap_or_else(|| "数据目录不可用".into()))),
-                    )
-                    .child(
-                        div().flex_1().min_w_0().min_h_0().px_4().pb_3().child(
-                            Editor::new(&self.editor)
-                                .h_full().w_full().bordered(false).text_size(px(15.)),
-                        ),
-                    ),
+                div().flex_1().min_h_0().px_4().pb_3().child(
+                    Editor::new(&self.editor)
+                        .h_full().w_full().bordered(false).text_size(px(15.)),
+                ),
             )
             .child(
                 h_flex()
@@ -615,8 +742,9 @@ mod ui_tests {
         SaveDocument, ValidateJson, bind_shortcuts,
     };
     use gpui_kit::{
-        AppContext, ClipboardItem, TestAppContext, WindowOptions, component::input::Undo,
-        test::TestWindowExt,
+        AppContext, ClipboardItem, TestAppContext, WindowOptions,
+        component::input::Undo,
+        test::{TestAppContextExt, TestWindowExt},
     };
 
     struct TestDirectory(std::path::PathBuf);
@@ -641,7 +769,7 @@ mod ui_tests {
     }
 
     #[gpui_kit::test]
-    fn saves_opens_renames_and_protects_unsaved_documents(cx: &mut TestAppContext) {
+    async fn saves_opens_renames_and_protects_unsaved_documents(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -678,19 +806,48 @@ mod ui_tests {
             view.read(cx).editor.clone().update(cx, |state, cx| {
                 state.set_value("{draft", window, cx);
             });
+            window.render_frame(cx);
+            window.click("open-history", cx);
             view.update(cx, |this, cx| {
                 this.request_document(DocumentDestination::New, window, cx);
             });
             assert!(view.read(cx).pending_document.is_some());
             assert_eq!(view.read(cx).editor.read(cx).value().as_str(), "{draft");
+        })
+        .unwrap();
+        cx.wait_for(
+            window.into(),
+            std::time::Duration::from_secs(1),
+            |window, _| {
+                window
+                    .try_find("cancel-switch")
+                    .is_some_and(|element| element.visible())
+            },
+        )
+        .await;
+        cx.update_window(window, |_, window, cx| {
+            // Dialog entrance uses a wall-clock animation; settle it before clicking.
+            std::thread::sleep(std::time::Duration::from_millis(280));
             window.render_frame(cx);
-            window.click("cancel-switch", cx);
+            window.within("dialog").click("cancel-switch", cx);
             assert!(view.read(cx).pending_document.is_none());
             view.update(cx, |this, cx| {
                 this.request_document(DocumentDestination::New, window, cx);
             });
-            window.render_frame(cx);
-            window.click("save-and-switch", cx);
+        })
+        .unwrap();
+        cx.wait_for(
+            window.into(),
+            std::time::Duration::from_secs(1),
+            |window, _| {
+                window
+                    .try_find("save-and-switch")
+                    .is_some_and(|element| element.visible())
+            },
+        )
+        .await;
+        cx.update_window(window, |_, window, cx| {
+            window.within("dialog").click("save-and-switch", cx);
         })
         .unwrap();
         cx.run_until_parked();
